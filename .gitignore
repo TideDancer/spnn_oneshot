@@ -1,6 +1,6 @@
-checkpoint/
-data/
-log/
-pretrain/
+checkpoint/*
+data/*
+log/*
+pretrain/*
 __pycache__/
 *.swp
