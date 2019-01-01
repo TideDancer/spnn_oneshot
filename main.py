@@ -41,7 +41,7 @@ def train_adv(epoch):
         inputs, targets = inputs.cuda(async=True), targets.cuda(async=True)
         optimizer_adv.zero_grad()
         outputs = net(inputs)
-        loss = -loss_ce(outputs, targets) # adv loss
+        loss = -loss_ce(outputs, targets) # + alpha*loss_mee(F.softmax(outputs), args.batch_size) # adv loss + mee loss
         loss.backward(retain_graph=True)
         optimizer_adv.step()
         train_loss += loss.item()
@@ -72,9 +72,9 @@ for i in range(n_layer):
     mask_prev.append(deepcopy(net.mask[i].data))
     # adv_save.append(deepcopy(net.mask[i].data))
     ratio.append([0, torch.numel(net.mask[i].data), torch.numel(net.mask[i].data)])
-skip = [0]*n_layer
 wait = [0]*n_layer
 inc = [1]*n_layer
+eps = [args.adv_eps]*n_layer
 tol = 0
 
 for epoch in range(LARGE_NUM):
@@ -83,17 +83,14 @@ for epoch in range(LARGE_NUM):
     if tol == 3: break
     for layerid in range(n_layer):
         print('---------------- start layer ',layerid,' ---------------')
-        if skip[layerid] == 1: 
-            print('### skip layer ', layerid, 'for no improvement ###')
-            continue
         if wait[layerid] > 0:
             print('### skip layer ', layerid,'wait: ',wait[layerid], ' ###')
             wait[layerid] -= 1
             continue
 
         ## adv train
-        clamper = EpsilonClipper(layerid, args.adv_eps)
-        tailer = MiddleClipper(layerid, args.adv_eps, args.thres, ratio[layerid][1]-inc[layerid], 1)
+        clamper = EpsilonClipper(layerid, eps[layerid])
+        tailer = MiddleClipper(layerid, eps[layerid], args.thres, ratio[layerid][1]-inc[layerid], 1)
         optimizer_adv = optim.Adam([net.mask[layerid]], lr=args.lr_adv)
         loss_prev = 0
         loss_diff = LARGE_NUM
@@ -114,7 +111,7 @@ for epoch in range(LARGE_NUM):
         if net.mask[layerid].data.nonzero().shape[0] >= mask_prev[layerid].nonzero().shape[0]:
             net.mask[layerid].data = deepcopy(mask_prev[layerid])
             print('>>>>>>> reverse layer ',layerid, ' since no improvement >>>>>>>')
-            skip[layerid] = 1
+            eps[layerid] *= 2
             continue
 
         ## forward training
@@ -139,7 +136,6 @@ for epoch in range(LARGE_NUM):
             print('==> this epoch: ',ratio[layerid][1], '/', ratio[layerid][2],', inc: ', inc[layerid])
             wait[layerid] += 1
             inc[layerid] = max(int(inc[layerid]/2), 1)
-            skip[layerid] = 1
             continue
 
         ratio[layerid][1] = net.mask[layerid].data.nonzero().shape[0] 
@@ -147,24 +143,17 @@ for epoch in range(LARGE_NUM):
        
         mask_prev[layerid] = deepcopy(net.mask[layerid].data)
         print('==> this epoch: ',ratio[layerid][1], '/', ratio[layerid][2])
-        inc[layerid] *= 2
-        print(inc)
+        inc[layerid] = min(inc[layerid]*2, int(ratio[layerid][1]/2)) if wait[layerid] == 0 else inc[layerid]
         
     ## print layer results
     for i in range(n_layer):
-        print('layer ',i,' : ',ratio[i][0], ' ==> ', ratio[i][1],'/',ratio[i][2],', inc: ',inc[layerid])
-    print('skip',skip,' wait',wait,' inc', inc)
+        print('layer ',i,' : ',ratio[i][0], ' ==> ', ratio[i][1],'/',ratio[i][2],', inc: ',inc[i])
+    print('eps',eps,' wait',wait,' inc',inc)
 
     ## save model or state_dict
     if args.save_format == 'net': torch.save(net, args.path_check)
     else: torch.save(net.state_dict(), args.path_check)
 
-    if all(e>0 for e in skip):
-        skip = [0]*n_layer
-        args.adv_eps = min(args.adv_eps + 0.1, 2)
-        print('############# increase adv_eps to ',args.adv_eps, ' #############')
-    if args.adv_eps == 10: break
-    
 #post train
 print("-------------- post train ------------")
 optimizer = optim.Adam(net.net.parameters(), lr=args.lr_forward/10)
@@ -176,4 +165,3 @@ for epoch in range(50):
 print("------------- sparsity -----------")
 for i in range(n_layer):
     print('layer ',i,' : ',ratio[i][0], ' ==> ', ratio[i][1],'/',ratio[i][2])
- 
