@@ -8,9 +8,9 @@ import Model
 
 parser = argparse.ArgumentParser(description='SPNN')
 parser.add_argument('arch', metavar='ARCH',
-                    help='model architecture: lenet53,lenet5,vgg16')
+                    help='model architecture: lenet53,lenet5,vgg16,alexnet')
 parser.add_argument('dataset', metavar='DATASET',
-                    help='dataset name: MNIST,CIFAR10')
+                    help='dataset name: MNIST,CIFAR10,ImageNet')
 parser.add_argument('path_data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('path_model', metavar='PRETRAINED',
@@ -43,39 +43,75 @@ args = parser.parse_args()
 
 # ------------ dataset -----------
 if args.dataset == 'CIFAR10':
-    # use cifar10
     classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
     img_size = 32
     n_channel = 3
-    
+
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                
     ])
     transform_test = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                
     ])
-    
+
     trainset = torchvision.datasets.CIFAR10(root=args.path_data, train=True, download=True, transform=transform_train)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
     testset = torchvision.datasets.CIFAR10(root=args.path_data, train=False, download=True, transform=transform_test)
     testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=args.workers)
     advloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
-    
+
 elif args.dataset == 'MNIST':
-    # use mnist
     img_size = 28
     n_channel = 1
     trainloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST(args.path_data, train=True, download=True, transform=transforms.ToTensor()), batch_size=args.batch_size, shuffle=True)
     testloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST(args.path_data, train=False, download=True, transform=transforms.ToTensor()), batch_size=args.batch_size, shuffle=True)
     advloader = torch.utils.data.DataLoader(torchvision.datasets.MNIST(args.path_data, train=True, download=True, transform=transforms.ToTensor()), batch_size=args.batch_size, shuffle=True)
-    
+
+elif args.dataset == 'ImageNet':
+    img_size = 224
+    n_channel = 3
+    traindir = args.path_data + 'train'
+    valdir = args.path_data + 'val'
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+    trainloader = torch.utils.data.DataLoader(
+            torchvision.datasets.ImageFolder(traindir, transforms.Compose([
+                transforms.RandomSizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            
+            ])),
+            batch_size=args.batch_size, shuffle=True,
+            num_workers=args.workers, pin_memory=True
+            
+            )
+    testloader = torch.utils.data.DataLoader(
+            torchvision.datasets.ImageFolder(valdir, transforms.Compose([
+                transforms.Scale(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                normalize,
+            
+            ])),
+            batch_size=args.batch_size, shuffle=False,
+            num_workers=args.workers, pin_memory=True
+            
+            )
+    advloader = trainloader
+
 
 # ------------ net arch ----------
-net = torch.load(args.path_model)
+if args.arch == 'alexnet':
+    net = torchvision.models.alexnet(pretrained=True)
+else:
+    net = torch.load(args.path_model)
 # print(net)
 
 if args.arch in ['vgg16']:
@@ -84,16 +120,24 @@ if args.arch in ['vgg16']:
 elif args.arch == 'lenet5':
     features_layerid = [0,3]
     classifier_layerid = [0]
+    safe = [4,10,200,0]
 elif args.arch == 'lenet53':
     features_layerid = []
     classifier_layerid = [0,2]
+    safe = [200, 160,50]
+elif args.arch == 'alexnet':
+    features_layerid = [0,3,6,8,10]
+    classifier_layerid = [1,4]
 
 
 # build masks
 mask_list = []
 for i in features_layerid:
     mask_list.append(torch.ones_like(net.features[i].bias))
-mask_list.append(torch.ones(net.classifier[0].in_features))
+if args.arch == 'alexnet':
+    mask_list.append(torch.ones(net.classifier[1].in_features))
+else:
+    mask_list.append(torch.ones(net.classifier[0].in_features))
 for i in classifier_layerid:
     mask_list.append(torch.ones_like(net.classifier[i].bias))
 n_layer = len(mask_list)
@@ -103,7 +147,11 @@ if args.arch == 'lenet53':
     net = Model.FC_Mask(net, mask_list, classifier_layerid)
 else:
     net = Model.CONV_Mask(net, mask_list, features_layerid, classifier_layerid)
-net = net.cuda()
+if args.arch == 'alexnet':
+    net = torch.nn.DataParallel(net).cuda()
+    net = net.module
+else:
+    net = net.cuda()
 print(net)
 
 
@@ -113,4 +161,3 @@ alpha = 1e-2
 ITER_NUM = 10000
 LARGE_NUM = 10000
 SMALL_NUM = 1e-3
-
